@@ -2,6 +2,7 @@ import { Page } from 'playwright';
 import { logger } from '../utils/logging';
 import { readFileSync } from 'fs';
 import { join } from 'path';
+import { BuildDomTreeOptions, DomTreeResult } from './types';
 
 export interface DomNode {
     tag: string;
@@ -10,35 +11,85 @@ export interface DomNode {
     children: DomNode[];
 }
 
+export interface DomElement {
+    index: number;
+    selector: string;
+    tagName: string;
+    isInteractive: boolean;
+    isVisible: boolean;
+    textContent?: string;
+    placeholder?: string;
+}
+
 export class DomService {
     private page: Page;
     private buildDomTreeFn: string;
 
     constructor(page: Page) {
         this.page = page;
-        // 读取 buildDomTree.js 文件内容
-        this.buildDomTreeFn = readFileSync(
-            join(__dirname, 'buildDomTree.js'),
-            'utf-8'
-        );
+        try {
+            // 读取 buildDomTree.js 文件内容
+            const scriptPath = join(__dirname, 'buildDomTree.js');
+            this.buildDomTreeFn = readFileSync(scriptPath, 'utf-8');
+            logger.info(`Successfully loaded buildDomTree.js from ${scriptPath}`);
+        } catch (error) {
+            logger.error('Failed to load buildDomTree.js:', error);
+            throw error;
+        }
     }
 
-    async getDomTree(selector: string = 'body'): Promise<any> {
+    async getDomTree(selector: string = 'body'): Promise<DomTreeResult | null> {
         try {
-            // 直接在 evaluate 中定义函数
-            const result = await this.page.evaluate(`
-                const buildDomTreeFn = ${this.buildDomTreeFn};
-                buildDomTreeFn({
-                    doHighlightElements: false,
-                    focusHighlightIndex: -1,
-                    viewportExpansion: 0
-                });
-            `);
+            // 注入并执行 buildDomTree 函数
+            const result = await this.page.evaluate<DomTreeResult>(
+                // 先注入函数定义
+                this.buildDomTreeFn + 
+                // 然后立即执行函数
+                `
+                (() => {
+                    const result = buildDomTree({
+                        doHighlightElements: false,
+                        focusHighlightIndex: -1,
+                        viewportExpansion: 0
+                    });
+                    return result;
+                })()
+                `
+            );
+
+            if (!result || !result.map) {
+                logger.warn('DOM tree result is empty or invalid');
+                return {
+                    rootId: '0',
+                    map: {}
+                };
+            }
+
+            // 打印找到的元素数量和一些示例
+            const interactiveElements = Object.values(result.map)
+                .filter((node: any) => node.isInteractive && node.isVisible);
+            logger.info(`Found ${interactiveElements.length} interactive elements`);
+            
+            if (interactiveElements.length > 0) {
+                logger.info('Sample elements:', 
+                    interactiveElements.slice(0, 3).map((node: any) => ({
+                        index: node.index,
+                        tagName: node.tagName,
+                        text: node.textContent || node.placeholder,
+                        selector: node.xpath || node.attributes?.['data-selector'] || node.attributes?.['id'],
+                        attributes: node.attributes
+                    }))
+                );
+            } else {
+                logger.warn('No interactive elements found on the page');
+                // 打印页面内容以便调试
+                const pageContent = await this.page.content();
+                logger.debug('Page content:', pageContent.substring(0, 1000));
+            }
 
             return result;
         } catch (error) {
             logger.error('Error getting DOM tree:', error);
-            // 打印更详细的错误信息
             if (error instanceof Error) {
                 logger.error('Error details:', {
                     message: error.message,
@@ -46,7 +97,10 @@ export class DomService {
                     name: error.name
                 });
             }
-            return null;
+            return {
+                rootId: '0',
+                map: {}
+            };
         }
     }
 
@@ -120,5 +174,24 @@ export class DomService {
             logger.error('Failed to get attribute', { selector, attributeName, error });
             return null;
         }
+    }
+
+    async getInteractiveElements(): Promise<DomElement[]> {
+        const domTree = await this.getDomTree();
+        if (!domTree || !domTree.map) {
+            return [];
+        }
+
+        return Object.values(domTree.map)
+            .filter((node: any) => node.isInteractive && node.isVisible)
+            .map((node: any) => ({
+                index: node.index,
+                selector: node.selector,
+                tagName: node.tagName,
+                isInteractive: node.isInteractive,
+                isVisible: node.isVisible,
+                textContent: node.textContent,
+                placeholder: node.placeholder
+            }));
     }
 } 

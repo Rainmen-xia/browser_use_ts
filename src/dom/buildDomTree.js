@@ -1,4 +1,4 @@
-(
+const buildDomTree = (
     args = {
       doHighlightElements: true,
       focusHighlightIndex: -1,
@@ -183,185 +183,77 @@
      * Checks if an element is interactive.
      */
     function isInteractiveElement(element) {
-      // Immediately return false for body tag
-      if (element.tagName.toLowerCase() === "body") {
-        return false;
-      }
-  
-      // Base interactive elements and roles
-      const interactiveElements = new Set([
-        "a",
-        "button",
-        "details",
-        "embed",
-        "input",
-        "label",
-        "menu",
-        "menuitem",
-        "object",
-        "select",
-        "textarea",
-        "summary",
+      // 基本的交互式元素标签
+      const interactiveTags = new Set([
+          'a', 'button', 'input', 'select', 'textarea', 'summary', 'video',
+          'audio', 'iframe', 'details', '[role="button"]', '[role="link"]',
+          '[role="searchbox"]', '[role="textbox"]', '[role="combobox"]'
       ]);
   
-      const interactiveRoles = new Set([
-        "button",
-        "menu",
-        "menuitem",
-        "link",
-        "checkbox",
-        "radio",
-        "slider",
-        "tab",
-        "tabpanel",
-        "textbox",
-        "combobox",
-        "grid",
-        "listbox",
-        "option",
-        "progressbar",
-        "scrollbar",
-        "searchbox",
-        "switch",
-        "tree",
-        "treeitem",
-        "spinbutton",
-        "tooltip",
-        "a-button-inner",
-        "a-dropdown-button",
-        "click",
-        "menuitemcheckbox",
-        "menuitemradio",
-        "a-button-text",
-        "button-text",
-        "button-icon",
-        "button-icon-only",
-        "button-text-icon-only",
-        "dropdown",
-        "combobox",
-      ]);
-  
-      const tagName = element.tagName.toLowerCase();
-      const role = element.getAttribute("role");
-      const ariaRole = element.getAttribute("aria-role");
-      const tabIndex = element.getAttribute("tabindex");
-  
-      // Add check for specific class
-      const hasAddressInputClass = element.classList.contains(
-        "address-input__container__input"
-      );
-  
-      // Basic role/attribute checks
-      const hasInteractiveRole =
-        hasAddressInputClass ||
-        interactiveElements.has(tagName) ||
-        interactiveRoles.has(role) ||
-        interactiveRoles.has(ariaRole) ||
-        (tabIndex !== null &&
-          tabIndex !== "-1" &&
-          element.parentElement?.tagName.toLowerCase() !== "body") ||
-        element.getAttribute("data-action") === "a-dropdown-select" ||
-        element.getAttribute("data-action") === "a-dropdown-button";
-  
-      if (hasInteractiveRole) return true;
-  
-      // Get computed style
-      const style = window.getComputedStyle(element);
-  
-      // Check if element has click-like styling
-      // const hasClickStyling = style.cursor === 'pointer' ||
-      //     element.style.cursor === 'pointer' ||
-      //     style.pointerEvents !== 'none';
-  
-      // Check for event listeners
-      const hasClickHandler =
-        element.onclick !== null ||
-        element.getAttribute("onclick") !== null ||
-        element.hasAttribute("ng-click") ||
-        element.hasAttribute("@click") ||
-        element.hasAttribute("v-on:click");
-  
-      // Helper function to safely get event listeners
-      function getEventListeners(el) {
-        try {
-          // Try to get listeners using Chrome DevTools API
-          return window.getEventListeners?.(el) || {};
-        } catch (e) {
-          // Fallback: check for common event properties
-          const listeners = {};
-  
-          // List of common event types to check
-          const eventTypes = [
-            "click",
-            "mousedown",
-            "mouseup",
-            "touchstart",
-            "touchend",
-            "keydown",
-            "keyup",
-            "focus",
-            "blur",
-          ];
-  
-          for (const type of eventTypes) {
-            const handler = el[`on${type}`];
-            if (handler) {
-              listeners[type] = [
-                {
-                  listener: handler,
-                  useCapture: false,
-                },
-              ];
-            }
-          }
-  
-          return listeners;
-        }
+      // 检查元素是否是基本的交互式元素
+      if (interactiveTags.has(element.tagName.toLowerCase())) {
+          return true;
       }
   
-      // Check for click-related events on the element itself
-      const listeners = getEventListeners(element);
-      const hasClickListeners =
-        listeners &&
-        (listeners.click?.length > 0 ||
-          listeners.mousedown?.length > 0 ||
-          listeners.mouseup?.length > 0 ||
-          listeners.touchstart?.length > 0 ||
-          listeners.touchend?.length > 0);
-  
-      // Check for ARIA properties that suggest interactivity
-      const hasAriaProps =
-        element.hasAttribute("aria-expanded") ||
-        element.hasAttribute("aria-pressed") ||
-        element.hasAttribute("aria-selected") ||
-        element.hasAttribute("aria-checked");
-  
-      // Check for form-related functionality
-      const isFormRelated =
-        element.form !== undefined ||
-        element.hasAttribute("contenteditable") ||
-        style.userSelect !== "none";
-  
-      // Check if element is draggable
-      const isDraggable =
-        element.draggable || element.getAttribute("draggable") === "true";
-  
-      // Additional check to prevent body from being marked as interactive
-      if (
-        element.tagName.toLowerCase() === "body" ||
-        element.parentElement?.tagName.toLowerCase() === "body"
-      ) {
-        return false;
+      // 检查元素的角色
+      const role = element.getAttribute('role');
+      if (role && interactiveTags.has(`[role="${role}"]`)) {
+          return true;
       }
   
-      return (
-        hasAriaProps ||
-        // hasClickStyling ||
-        hasClickHandler ||
-        hasClickListeners ||
-        // isFormRelated ||
-        isDraggable
+      // 检查特定的类名或属性
+      const hasInteractiveClass = element.className && (
+          element.className.includes('clickable') ||
+          element.className.includes('button') ||
+          element.className.includes('input') ||
+          element.className.includes('select') ||
+          element.className.includes('search')
       );
+  
+      if (hasInteractiveClass) {
+          return true;
+      }
+  
+      // 检查是否有点击事件监听器
+      const hasClickListener = element.onclick !== null || 
+          element.getAttribute('onclick') !== null ||
+          element.getAttribute('ng-click') !== null ||
+          element.getAttribute('@click') !== null;
+  
+      if (hasClickListener) {
+          return true;
+      }
+  
+      // 检查特定的数据属性
+      const hasDataInteractive = Array.from(element.attributes)
+          .some(attr => attr.name.startsWith('data-') && (
+              attr.name.includes('click') ||
+              attr.name.includes('action') ||
+              attr.name.includes('target') ||
+              attr.name.includes('toggle')
+          ));
+  
+      if (hasDataInteractive) {
+          return true;
+      }
+  
+      // 检查父元素是否是表单控件
+      const isFormControl = element.closest('form') !== null &&
+          (element.tagName.toLowerCase() === 'div' || element.tagName.toLowerCase() === 'span');
+  
+      if (isFormControl) {
+          return true;
+      }
+  
+      // 检查是否有特定的占位符或标签
+      const hasPlaceholder = element.getAttribute('placeholder') !== null;
+      const hasAriaLabel = element.getAttribute('aria-label') !== null;
+  
+      if (hasPlaceholder || hasAriaLabel) {
+          return true;
+      }
+  
+      return false;
     }
   
     /**
@@ -705,4 +597,7 @@
   
     return { rootId, map: DOM_HASH_MAP };
   };
+  
+  // 直接设置为全局函数
+  window.buildDomTree = buildDomTree;
   

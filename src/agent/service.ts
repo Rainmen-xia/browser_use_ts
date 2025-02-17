@@ -6,6 +6,7 @@ import { logger } from '../utils/logging';
 import { DomService } from '../dom/service';
 import { Claude, ClaudeMessage } from '../llm/claude';
 import { existsSync, mkdirSync } from 'fs';
+import { DomTreeResult } from '../dom/types';
 
 interface AgentResponse {
     current_state: {
@@ -57,7 +58,10 @@ export class Agent {
                 // 获取当前页面状态
                 const pageState = await this.getPageState();
                 
-                // 将页面状态添加到对话
+                // 获取历史总结
+                const historySummary = await this.summarizeHistory();
+                
+                // 将页面状态和历史总结添加到对话
                 messages.push({
                     role: 'assistant',
                     content: `Current page state:
@@ -67,9 +71,20 @@ export class Agent {
 - Clickable elements:
 ${pageState.clickableElements}
 - Visible text: ${pageState.visibleText?.substring(0, 200)}...
+- Action history: ${historySummary}
 
-Based on this state, analyze the current situation and suggest the next action.
-Remember to use the correct element index from the clickable elements list.`
+Based on this state:
+1. Analyze the current page content and available interactions
+2. Compare with the task goal: "${this.task}"
+3. Determine if all required steps for the task are complete
+4. If not complete, decide the most appropriate next action using the available elements
+5. If complete, return {"type": "complete"}
+
+Remember:
+- Use the correct element index from the clickable elements list
+- Wait for any dynamic content to load after interactions
+- Only mark as complete when ALL required steps are done
+- Consider the full task requirements before completion`
                 });
 
                 // 获取 LLM 的响应
@@ -139,26 +154,53 @@ Remember to use the correct element index from the clickable elements list.`
         // 获取可点击元素的描述
         let clickableElements = '';
         if (domTree && domTree.map) {
-            clickableElements = Object.values(domTree.map)
+            const elements = Object.values(domTree.map)
                 .filter((node: any) => node.isInteractive && node.isVisible)
                 .map((node: any) => {
-                    return `[${node.index}]<${node.tagName}>${node.textContent || node.placeholder || ''}</${node.tagName}>`;
-                })
-                .join('\n');
+                    // 构建更详细的元素描述
+                    const text = node.textContent || node.placeholder || '';
+                    const attrs = Object.entries(node.attributes || {})
+                        .filter(([key]) => ['type', 'role', 'aria-label', 'placeholder', 'name', 'id', 'class'].includes(key))
+                        .map(([key, value]) => `${key}="${value}"`)
+                        .join(' ');
+                    
+                    // 包含更多上下文信息
+                    const context = node.xpath?.split('/')?.slice(-2).join('/') || '';
+                    return `[${node.index}]<${node.tagName} ${attrs}>${text}</${node.tagName}> (${context})`;
+                });
+            
+            if (elements.length > 0) {
+                clickableElements = 'Interactive elements on page:\n' + elements.join('\n');
+                logger.info('Found clickable elements:', elements.length);
+                logger.debug('Sample elements:', elements.slice(0, 3));
+            } else {
+                clickableElements = 'No interactive elements found on the page';
+                logger.warn(clickableElements);
+                
+                // 如果没有找到交互元素，打印页面内容以便调试
+                const pageContent = await page.content();
+                logger.debug('Page content:', pageContent.substring(0, 1000));
+            }
         }
 
-        return {
+        // 获取页面状态
+        const state = {
             url: page.url(),
             title: await page.title(),
-            interactiveElements: this.countInteractiveElements(domTree),
+            interactiveElements: domTree ? Object.values(domTree.map)
+                .filter((node: any) => node.isInteractive && node.isVisible).length : 0,
             visibleText: await page.evaluate(() => {
                 return Array.from(document.querySelectorAll('*'))
                     .map(el => el.textContent)
                     .filter(text => text && text.trim())
-                    .join('\n');
+                    .join('\n')
+                    .substring(0, 500); // 限制文本长度
             }),
             clickableElements
         };
+
+        logger.info('Current page state:', state);
+        return state;
     }
 
     private parseResponse(content: string): ActionModel[] {
@@ -179,17 +221,29 @@ Remember to use the correct element index from the clickable elements list.`
                 
                 if (matches) {
                     logger.info('Found JSON matches:', matches);
-                    // 尝试解析每个匹配项
+                    // 尝试合并状态和动作
+                    let currentState;
+                    let action;
+
                     for (const match of matches) {
                         try {
-                            parsed = JSON.parse(match);
-                            if (parsed.current_state && parsed.action) {
-                                logger.info('Successfully parsed JSON from match:', parsed);
-                                break;
+                            const obj = JSON.parse(match);
+                            if (obj.page_summary) {
+                                currentState = obj;
+                            } else if (obj.type && obj.params) {
+                                action = obj;
                             }
                         } catch (err) {
                             logger.debug('Failed to parse match:', match);
                         }
+                    }
+
+                    if (currentState && action) {
+                        parsed = {
+                            current_state: currentState,
+                            action: action
+                        };
+                        logger.info('Successfully combined state and action:', parsed);
                     }
                 }
             }
@@ -207,10 +261,51 @@ Remember to use the correct element index from the clickable elements list.`
                     memory: parsed.current_state.memory,
                     next_goal: parsed.current_state.next_goal
                 });
+
+                // 检查任务是否真的完成
+                if (parsed.action?.type === 'complete') {
+                    // 检查 memory 中是否包含未完成的步骤
+                    const memory = parsed.current_state.memory?.toLowerCase() || '';
+                    const nextGoal = parsed.current_state.next_goal?.toLowerCase() || '';
+                    const task = this.task.toLowerCase();
+                    
+                    // 检查是否需要搜索
+                    if (task.includes('search') || task.includes('查询') || task.includes('预订') || task.includes('book')) {
+                        const hasSearched = this.history.some(item => 
+                            (item.action.type === 'click' && 
+                             (item.action.params as ClickParams).selector.includes('search-btn')) ||
+                            memory.includes('searched') || 
+                            memory.includes('found results')
+                        );
+                        
+                        if (!hasSearched) {
+                            logger.warn('Search not performed yet, ignoring complete action');
+                            return [];
+                        }
+                    }
+                    
+                    // 检查其他未完成的步骤
+                    if (memory.includes('need to') || 
+                        memory.includes('waiting for') || 
+                        memory.includes('not yet') ||
+                        nextGoal.includes('need to') ||
+                        nextGoal.includes('waiting for') ||
+                        nextGoal.includes('enter') ||
+                        nextGoal.includes('select') ||
+                        nextGoal.includes('search') ||
+                        nextGoal.includes('click')) {
+                        logger.warn('Task not actually complete, ignoring complete action');
+                        return [];
+                    }
+                }
             }
 
             // 返回动作
             if (parsed.action) {
+                // 如果是截图动作，确保有路径
+                if (parsed.action.type === 'screenshot' && !parsed.action.params.path) {
+                    parsed.action.params.path = `screenshots/task-${new Date().toISOString().replace(/[:.]/g, '-')}.png`;
+                }
                 return [parsed.action];
             }
 
@@ -249,9 +344,9 @@ Remember to use the correct element index from the clickable elements list.`
 
         const page = await this.context!.getPage();
         const startTime = new Date();
+        let result: ActionResult;
 
         try {
-            let result: ActionResult;
             switch (action.type) {
                 case 'goto':
                     await page.goto((action.params as GotoParams).url);
@@ -277,8 +372,8 @@ Remember to use the correct element index from the clickable elements list.`
                         const clickParams = action.params as ClickParams;
                         // 如果是索引，使用索引点击
                         if (clickParams.index !== undefined) {
-                            const elements = await this.domService?.getInteractiveElements();
-                            const element = elements?.find(e => e.index === clickParams.index);
+                            const elements = await this.domService?.getInteractiveElements() || [];
+                            const element = elements.find(e => e.index === clickParams.index);
                             if (element) {
                                 await page.click(element.selector);
                                 result = { success: true };
@@ -306,14 +401,35 @@ Remember to use the correct element index from the clickable elements list.`
 
                 case 'type':
                     const typeParams = action.params as TypeParams;
-                    await page.type(typeParams.selector, typeParams.text);
-                    result = { success: true };
+                    try {
+                        // 等待元素出现
+                        const element = await page.waitForSelector(typeParams.selector, { timeout: 5000 });
+                        if (!element) {
+                            throw new Error(`Element not found: ${typeParams.selector}`);
+                        }
+
+                        // 先清空输入框
+                        await element.fill('');
+                        
+                        // 等待一下以确保清空完成
+                        await page.waitForTimeout(100);
+
+                        // 输入新文本
+                        await element.type(typeParams.text, { delay: 50 });
+                        
+                        // 等待一下以确保输入完成
+                        await page.waitForTimeout(500);
+
+                        result = { success: true };
+                    } catch (error) {
+                        logger.error(`Failed to type into ${typeParams.selector}:`, error);
+                        throw error;
+                    }
                     break;
 
                 case 'screenshot':
                     const screenshotParams = action.params as ScreenshotParams;
-                    // 如果没有指定路径，使用默认路径
-                    let path = screenshotParams.path || `task-${new Date().toISOString().replace(/[:.]/g, '-')}.png`;
+                    let path = screenshotParams.path || `screenshots/task-${new Date().toISOString().replace(/[:.]/g, '-')}.png`;
                     
                     // 确保路径以 .png 结尾
                     if (!path.toLowerCase().endsWith('.png')) {
@@ -331,9 +447,42 @@ Remember to use the correct element index from the clickable elements list.`
                         mkdirSync(dir, { recursive: true });
                     }
 
-                    const buffer = await page.screenshot({ path });
-                    logger.info(`Screenshot saved to: ${path}`);
-                    result = { success: true, data: buffer };
+                    try {
+                        // 等待页面加载完成
+                        await page.waitForLoadState('networkidle');
+                        await page.waitForTimeout(1000);
+
+                        // 确保页面稳定
+                        await page.evaluate(() => {
+                            return new Promise((resolve) => {
+                                if (document.readyState === 'complete') {
+                                    resolve(true);
+                                } else {
+                                    window.addEventListener('load', () => resolve(true));
+                                }
+                            });
+                        });
+
+                        // 截图前记录
+                        logger.info(`Taking screenshot: ${path}`);
+                        const buffer = await page.screenshot({ 
+                            path,
+                            fullPage: true  // 捕获整个页面
+                        });
+                        logger.info(`Screenshot saved to: ${path}`);
+                        
+                        // 验证文件是否创建
+                        if (existsSync(path)) {
+                            logger.info(`Screenshot file exists at: ${path}`);
+                        } else {
+                            logger.error(`Failed to create screenshot at: ${path}`);
+                        }
+
+                        result = { success: true, data: buffer };
+                    } catch (error) {
+                        logger.error(`Screenshot error:`, error);
+                        throw error;
+                    }
                     break;
 
                 default:
@@ -353,22 +502,49 @@ Remember to use the correct element index from the clickable elements list.`
         }
     }
 
-    async getDomTree(): Promise<any | null> {
+    private async getDomTree(): Promise<DomTreeResult | null> {
         if (this.domService) {
             return await this.domService.getDomTree();
         }
         return null;
     }
 
-    private countInteractiveElements(domTree: any): number {
-        let count = 0;
-        if (domTree.map) {
-            Object.values(domTree.map).forEach((node: any) => {
-                if (node.isInteractive && node.isVisible) {
-                    count++;
-                }
-            });
+    private countInteractiveElements(domTree: DomTreeResult | null): number {
+        if (!domTree || !domTree.map) {
+            return 0;
         }
-        return count;
+        return Object.values(domTree.map)
+            .filter(node => node.isInteractive && node.isVisible)
+            .length;
     }
-} 
+
+    private async summarizeHistory(): Promise<string> {
+        if (this.history.length === 0) {
+            return 'Just starting';
+        }
+
+        const summaries = this.history.map(item => {
+            const action = item.action;
+            switch (action.type) {
+                case 'goto':
+                    return `Navigated to ${(action.params as GotoParams).url}`;
+                case 'type':
+                    return `Typed "${(action.params as TypeParams).text}" into ${(action.params as TypeParams).selector}`;
+                case 'click':
+                    const selector = (action.params as ClickParams).selector;
+                    if (selector.includes('search-btn')) {
+                        return 'Clicked search button';
+                    }
+                    return `Clicked ${selector}`;
+                case 'waitForSelector':
+                    return `Waited for ${(action.params as WaitForSelectorParams).selector}`;
+                case 'screenshot':
+                    return 'Took screenshot';
+                default:
+                    return `Performed ${action.type} action`;
+            }
+        });
+
+        return summaries.join(' -> ');
+    }
+}

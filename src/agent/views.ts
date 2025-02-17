@@ -16,6 +16,7 @@ export interface GotoParams extends BaseParams {
 
 export interface ClickParams extends BaseParams {
     selector: string;
+    index?: number;
 }
 
 export interface TypeParams extends BaseParams {

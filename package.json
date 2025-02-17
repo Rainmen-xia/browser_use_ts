@@ -1,0 +1,29 @@
+{
+  "name": "browser-use-ts",
+  "version": "1.0.0",
+  "description": "TypeScript version of browser-use",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "test": "playwright test",
+    "start": "ts-node src/index.ts"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@types/node-fetch": "^2.6.12",
+    "dotenv": "^16.4.7",
+    "node-fetch": "^3.3.2",
+    "playwright": "^1.42.1",
+    "winston": "^3.12.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.42.1",
+    "@types/node": "^20.11.24",
+    "@types/winston": "^2.4.4",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.3.3"
+  }
+}

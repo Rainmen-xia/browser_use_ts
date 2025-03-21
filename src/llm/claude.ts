@@ -22,7 +22,7 @@ export class Claude {
     private token: string;
 
     constructor() {
-        this.baseUrl = process.env.PROXY_URL || 'http://example.com/llmproxy/chat/completions';
+        this.baseUrl = process.env.PROXY_URL || 'http://http://example.com/llmproxy/chat/completions';
         this.modelName = process.env.MODEL_NAME || 'claude-3-5-sonnet-20241022';
         this.token = process.env.VENUS_TOKEN || '';
         
